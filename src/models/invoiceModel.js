@@ -87,3 +87,37 @@ exports.remove = async (id) => {
   if (rows.length) throw new ApiError(409, 'Invoice has payments and cannot be deleted. Write it off instead.');
   return (await query('DELETE FROM invoices WHERE id = $1', [id])).rowCount > 0;
 };
+
+// One row per invoice for the Excel/CSV export, with payment details folded in.
+// scope: 'all' | 'paid' | 'unpaid' (unpaid = unpaid + part paid + overdue; written-off debts are only in 'all')
+exports.getExportRows = async ({ scope = 'all', from, to, customer_id, created_by } = {}) => {
+  const TZ = process.env.APP_TZ || 'Africa/Nairobi';
+  const cond = [];
+  const params = [TZ];
+  if (scope === 'paid') cond.push(`s.status = 'PAID'`);
+  if (scope === 'unpaid') cond.push(`s.status IN ('UNPAID','PARTIAL','OVERDUE')`);
+  if (from) { params.push(from); cond.push(`s.issue_date >= $${params.length}`); }
+  if (to) { params.push(to); cond.push(`s.issue_date <= $${params.length}`); }
+  if (customer_id) { params.push(customer_id); cond.push(`s.customer_id = $${params.length}`); }
+  if (created_by) { params.push(created_by); cond.push(`s.created_by = $${params.length}`); }
+  // NB: no margin/cost columns here on purpose, staff can export too
+  const { rows } = await query(
+    `SELECT s.invoice_no, s.delivery_note_no, s.customer, s.issue_date, s.due_date,
+            s.total, s.paid, s.balance, s.status,
+            CASE WHEN s.status = 'OVERDUE' THEN CURRENT_DATE - s.due_date END AS days_overdue,
+            p.last_paid, p.methods, p.refs, p.cheque_nos, p.cheque_payers, s.seller
+     FROM invoice_summary s
+     LEFT JOIN (
+       SELECT py.invoice_id,
+              (MAX(py.paid_at) AT TIME ZONE $1)::date AS last_paid,
+              string_agg(DISTINCT py.method, ', ') AS methods,
+              string_agg(py.reference, ', ' ORDER BY py.paid_at) FILTER (WHERE py.reference IS NOT NULL) AS refs,
+              string_agg(DISTINCT ch.cheque_no, ', ') AS cheque_nos,
+              string_agg(DISTINCT ch.payer_name, ', ') AS cheque_payers
+       FROM payments py LEFT JOIN cheques ch ON ch.id = py.cheque_id
+       GROUP BY py.invoice_id
+     ) p ON p.invoice_id = s.id
+     ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''}
+     ORDER BY s.issue_date DESC, s.id DESC`, params);
+  return rows;
+};

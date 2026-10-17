@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cheques - Expur</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2317151f'/%3E%3Ctext x='16' y='22.5' font-family='Arial' font-weight='700' font-size='18' text-anchor='middle' fill='white'%3EE%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<main class="view" id="view">
+  <div class="stack">
+    <section class="card" id="work"></section>
+    <section class="card">
+      <div class="card-h">Cheque register
+        <div class="right-slot"><div class="seg" id="hf" role="group" aria-label="Filter cheques"></div></div></div>
+      <div class="card-b flush tbl-wrap" id="history"><div class="empty">Loading...</div></div>
+    </section>
+  </div>
+  <input type="file" id="cam" accept="image/*" capture="environment" class="hide">
+  <input type="file" id="pick" accept="image/*" class="hide">
+</main>
+<script src="/js/app.js"></script>
+<script>
+const work = () => $('#work');
+let S = null;            // the cheque currently being reviewed
+let hist = [], hfilter = 'all';
+
+/* ------------------------------------------------------------ step 1: get a photo */
+function showDrop() {
+  S = null;
+  work().innerHTML = `<div class="card-b"><div class="drop" id="drop">
+      <div class="ico">${ico('scan')}</div>
+      <h3>Scan a cheque</h3>
+      <p>Take a photo or choose one from your phone. The payer, amount and cheque number are read for you and matched to your unpaid invoices. You check it before anything is recorded.</p>
+      <div class="acts"><button class="btn primary" id="b-cam">${ico('camera')}Take photo</button><button class="btn" id="b-pick">${ico('image')}Choose a photo</button></div>
+      <p class="hint muted" style="margin:14px auto 0;font-size:12.5px">Tip: if the customer sent a remittance slip with invoice numbers, put it in the same photo as the cheque.</p>
+    </div></div>`;
+  $('#b-cam').onclick = () => $('#cam').click();
+  $('#b-pick').onclick = () => $('#pick').click();
+  const drop = $('#drop');
+  ['dragenter', 'dragover'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', (e) => { const f = e.dataTransfer.files[0]; if (f) handleFile(f); });
+}
+['cam', 'pick'].forEach((id) => { $('#' + id).onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) handleFile(f); }; });
+
+async function handleFile(file) {
+  if (!file.type.startsWith('image/')) return notify('Please choose a photo (JPEG or PNG).', 'bad');
+  work().innerHTML = `<div class="card-b"><div class="busy" role="status"><span class="spin"></span>Reading the cheque. This takes a few seconds...</div></div>`;
+  try {
+    const blob = await prepImage(file);
+    showReview(await upload('/cheques/scan', blob));
+    loadHistory();
+  } catch (e) { notify(e.message, 'bad'); showDrop(); }
+}
+
+/* ------------------------------------------------------------ step 2: review + match */
+const val = (id) => $(id).value.trim();
+const num = (id) => { const v = parseFloat($(id).value); return Number.isFinite(v) ? v : 0; };
+const round2 = (n) => Math.round(n * 100) / 100;
+
+function showReview(r) {
+  const c = r.cheque, sg = r.suggestion || { allocations: [], open_invoices: [], candidates: [] };
+  S = { r, id: c.id, refs: r.extracted?.references || [], locked: false, customer: sg.customer_id, sg, extra: [], alloc: new Map(), timer: 0 };
+  adoptSuggestion(sg);
+
+  const scanMsg = r.scan_error ? (isAdmin() || r.scan_available ? r.scan_error : 'Automatic reading is not available right now. Please fill in the details from the photo.') : '';
+  work().innerHTML = `
+    <div class="card-h">Check this cheque<span class="pill warn">To review</span>
+      <div class="right-slot"><button class="btn sm danger" id="discard">Discard</button></div></div>
+    <div class="card-b">
+      <div class="review">
+        <div class="stack">
+          <div class="photo" id="photo"><span class="muted">Loading photo...</span></div>
+          <div class="notes" id="warns"></div>
+        </div>
+        <div class="stack">
+          ${scanMsg ? `<div class="note warn" role="alert">${ico('alert')}<span>${esc(scanMsg)}${r.scan_available ? ` <button class="btn sm" id="rescan" style="margin-left:6px">Try again</button>` : ''}</span></div>` : ''}
+          <div class="form-grid">
+            <div class="field c8"><label for="f-payer">Paid by (name on the cheque)</label><input class="in" id="f-payer" value="${esc(c.payer_name || '')}" maxlength="120" autocomplete="off"></div>
+            <div class="field c4"><label for="f-no">Cheque no.</label><input class="in" id="f-no" value="${esc(c.cheque_no || '')}" maxlength="50" autocomplete="off" inputmode="numeric"></div>
+            <div class="field c4"><label for="f-amt">Amount (KES)</label><input class="in" id="f-amt" type="number" step="0.01" min="0" value="${c.amount ?? ''}"></div>
+            <div class="field c4"><label for="f-date">Cheque date</label><input class="in" id="f-date" type="date" value="${esc(String(c.cheque_date || '').slice(0, 10))}"></div>
+            <div class="field c4"><label for="f-bank">Bank</label><input class="in" id="f-bank" value="${esc(c.bank || '')}" maxlength="80" autocomplete="off"></div>
+          </div>
+          ${S.refs.length ? `<div class="muted">Invoice or delivery note numbers written on it: ${S.refs.map((x) => `<span class="pill info">${esc(x)}</span>`).join(' ')}</div>` : ''}
+        </div>
+      </div>
+    </div>
+    <div id="match"></div>`;
+
+  chequePhoto(c.id).then((u) => {
+    $('#photo').innerHTML = `<img src="${u}" alt="Photo of the cheque" title="Click to enlarge">`;
+    $('#photo img').onclick = () => openModal(`<div class="dlg-h"><h2>Cheque photo</h2>${closeBtn}</div><div class="dlg-b"><img src="${u}" alt="Cheque photo, full size" style="width:100%;border-radius:10px"></div>`, true);
+  }).catch(() => { $('#photo').innerHTML = '<span class="muted">Photo unavailable</span>'; });
+
+  drawWarns(r.warnings);
+  drawMatch();
+
+  $('#discard').onclick = discardCurrent;
+  const rs = $('#rescan');
+  if (rs) rs.onclick = async () => { rs.disabled = true; try { showReview(await api(`/cheques/${S.id}/rescan`, { method: 'POST' })); } catch (e) { notify(e.message, 'bad'); rs.disabled = false; } };
+  ['#f-payer', '#f-amt', '#f-no'].forEach((s) => $(s).addEventListener('input', () => {
+    drawTotals();
+    if (s === '#f-no') return;
+    clearTimeout(S.timer); S.timer = setTimeout(rematch, 650);   // payer/amount changed: re-suggest invoices
+  }));
+}
+
+function drawWarns(w) {
+  const icon = { bad: 'alert', warn: 'alert', info: 'info' };
+  $('#warns').innerHTML = (w || []).map((x) => `<div class="note ${x.level}">${ico(icon[x.level] || 'info')}<span>${esc(x.message)}</span></div>`).join('');
+}
+
+function adoptSuggestion(sg) {
+  S.sg = sg; S.customer = sg.customer_id;
+  S.alloc = new Map((sg.allocations || []).map((a) => [a.invoice_id, a.apply]));
+}
+const openList = () => {
+  const base = S.sg.open_invoices || [], seen = new Set(base.map((i) => i.invoice_id));
+  return [...base, ...S.extra.filter((i) => !seen.has(i.invoice_id))];
+};
+
+async function rematch(customerId) {
+  try {
+    const body = { payer_name: val('#f-payer') || null, amount: num('#f-amt') || null, references: S.refs, cheque_no: val('#f-no') || null, customer_id: customerId || (S.locked ? S.customer : null) };
+    const { suggestion } = await api('/cheques/match', { method: 'POST', body });
+    adoptSuggestion(suggestion); drawMatch();
+  } catch (e) { notify(e.message, 'bad'); }
+}
+
+const CONF = { high: ['var(--ok)', 'Strong match'], medium: ['var(--orange)', 'Likely match, please check'], low: ['var(--muted)', 'Weak match, please check'], none: ['var(--muted)', 'No match found'] };
+
+function drawMatch() {
+  const sg = S.sg, list = openList(), [cc, cl] = CONF[sg.confidence] || CONF.none;
+  customers().then((cs) => {
+    if (!$('#match')) return;
+    $('#match').innerHTML = `
+      <div style="border-top:1px solid var(--line);padding:16px 20px 4px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <div style="font-weight:600;font-size:14.5px">Which invoices does it pay?</div>
+        <span class="conf" style="margin-left:auto"><i style="background:${cc}"></i>${cl}</span>
+      </div>
+      <div style="padding:0 20px 8px;display:flex;gap:12px;align-items:end;flex-wrap:wrap">
+        <div class="field" style="min-width:240px;flex:1;max-width:360px"><label for="m-cust">Customer</label>
+          <select class="in" id="m-cust"><option value="">Choose a customer</option>${cs.map((x) => `<option value="${x.id}" ${x.id === S.customer ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
+        ${sg.reason ? `<span class="muted" style="padding-bottom:10px">Matched by ${esc(sg.reason)}</span>` : ''}
+      </div>
+      ${sg.payer_differs ? `<div style="padding:0 20px 8px"><div class="note warn">${ico('alert')}<span>The name on the cheque does not look like this customer. It may be paid by someone on their behalf. Confirm before recording.</span></div></div>` : ''}
+      <div class="tbl-wrap alloc" id="alloc"></div>
+      <div style="padding:10px 20px 14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <div class="search"><input class="in sm" id="find" placeholder="Add another invoice by number" style="width:260px;padding-left:12px" autocomplete="off"></div>
+        <button class="btn sm" id="find-go" type="button">Find</button><div id="found" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      </div>
+      <div class="summary" id="totals"></div>`;
+    $('#m-cust').onchange = (e) => { S.locked = !!e.target.value; S.customer = +e.target.value || null; rematch(+e.target.value || undefined); };
+    const doFind = async () => {
+      const q = val('#find'); if (!q) return;
+      try {
+        const rows = await api('/invoices?status=outstanding&search=' + encodeURIComponent(q));
+        $('#found').innerHTML = rows.length ? rows.slice(0, 6).map((i) => `<button class="btn sm" type="button" data-add="${i.id}">${esc(i.invoice_no)}, ${esc(i.customer)}, ${kes(i.balance)}</button>`).join('') : '<span class="muted">No unpaid invoice found.</span>';
+        $('#found').onclick = (e) => {
+          const b = e.target.closest('[data-add]'); if (!b) return;
+          const i = rows.find((x) => x.id === +b.dataset.add);
+          if (!openList().some((x) => x.invoice_id === i.id)) S.extra.push({ invoice_id: i.id, invoice_no: i.invoice_no, delivery_note_no: i.delivery_note_no, customer: i.customer, customer_id: i.customer_id, due_date: i.due_date, balance: i.balance, status: i.status });
+          S.alloc.set(i.id, Math.min(Number(i.balance), Math.max(0, round2(num('#f-amt') - allocated()))) || Number(i.balance));
+          $('#found').innerHTML = ''; $('#find').value = ''; drawAlloc();
+        };
+      } catch (e) { notify(e.message, 'bad'); }
+    };
+    $('#find-go').onclick = doFind;
+    $('#find').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doFind(); } });
+    drawAlloc();
+  });
+}
+
+let custCache;
+const customers = () => (custCache ||= api('/customers'));
+const allocated = () => round2([...S.alloc.values()].reduce((s, v) => s + (Number(v) || 0), 0));
+
+function drawAlloc() {
+  const list = openList();
+  if (!list.length) {
+    $('#alloc').innerHTML = `<div class="empty"><b>${S.customer ? 'No unpaid invoices for this customer' : 'Choose the customer this cheque is from'}</b>${S.customer ? 'Use the box below to add an invoice by number.' : 'Their unpaid invoices will appear here.'}</div>`;
+    return drawTotals();
+  }
+  $('#alloc').innerHTML = `<table class="tbl"><thead><tr><th style="width:44px"></th><th>Invoice no.</th><th>Delivery note</th><th>Due</th><th class="right">Balance</th><th class="right">Apply to it</th></tr></thead><tbody>
+    ${list.map((i) => { const on = S.alloc.has(i.invoice_id); return `<tr class="${on ? '' : 'off'}" data-id="${i.invoice_id}">
+      <td><input type="checkbox" ${on ? 'checked' : ''} aria-label="Apply to invoice ${esc(i.invoice_no)}"></td>
+      <td class="two"><b style="font-weight:600">${esc(i.invoice_no)}</b><span class="sub">${esc(i.customer)}</span></td><td>${i.delivery_note_no ? esc(i.delivery_note_no) : '<span class="dim">-</span>'}</td>
+      <td>${fmtDate(i.due_date)}</td><td class="right">${kes(i.balance)}</td>
+      <td class="right"><input class="in sm" type="number" step="0.01" min="0" max="${i.balance}" value="${on ? S.alloc.get(i.invoice_id) : ''}" ${on ? '' : 'disabled'} aria-label="Amount to apply to ${esc(i.invoice_no)}"></td></tr>`; }).join('')}</tbody></table>`;
+  drawTotals();
+}
+
+$('#work').addEventListener('change', (e) => {
+  const tr = e.target.closest('#alloc tr[data-id]'); if (!tr || !S) return;
+  const id = +tr.dataset.id, inv = openList().find((i) => i.invoice_id === id);
+  if (e.target.type === 'checkbox') {
+    if (e.target.checked) {
+      const left = round2(num('#f-amt') - allocated());
+      S.alloc.set(id, num('#f-amt') > 0 ? Math.min(Number(inv.balance), Math.max(left, 0)) || Number(inv.balance) : Number(inv.balance));
+    } else S.alloc.delete(id);
+    drawAlloc();
+  }
+});
+$('#work').addEventListener('input', (e) => {
+  const tr = e.target.closest('#alloc tr[data-id]'); if (!tr || e.target.type !== 'number' || !S) return;
+  S.alloc.set(+tr.dataset.id, parseFloat(e.target.value) || 0); drawTotals();
+});
+
+function problems() {
+  const amt = num('#f-amt'), a = allocated(), p = [];
+  const list = openList();
+  if (!val('#f-no')) p.push('Enter the cheque number.');
+  if (!(amt > 0)) p.push('Enter the cheque amount.');
+  if (!S.alloc.size) p.push('Tick at least one invoice this cheque pays.');
+  for (const [id, v] of S.alloc) {
+    const i = list.find((x) => x.invoice_id === id);
+    if (!(v > 0)) p.push(`Enter an amount for invoice ${i?.invoice_no}.`);
+    else if (i && v > Number(i.balance) + 0.001) p.push(`Invoice ${i.invoice_no} only has ${kes(i.balance)} left to pay.`);
+  }
+  if (amt > 0 && a > amt + 0.001) p.push(`You applied ${kes(a)}, which is more than the cheque (${kes(amt)}).`);
+  return p;
+}
+
+function drawTotals() {
+  const t = $('#totals'); if (!t) return;
+  const amt = num('#f-amt'), a = allocated(), left = round2(amt - a), probs = problems();
+  const bad = probs.filter((x) => /more than|only has/.test(x));
+  t.innerHTML = `<div class="grow">
+      <div><b>${kes(a)}</b> <span class="muted">applied of</span> <b>${kes(amt)}</b></div>
+      ${amt > 0 && left > 0.001 && S.alloc.size ? `<div class="delta" style="color:var(--warn)">${kes(left)} of the cheque is not applied to any invoice</div>` : ''}
+      ${amt > 0 && Math.abs(left) < 0.01 && S.alloc.size && !bad.length ? `<div class="delta" style="color:var(--ok)">Fully applied</div>` : ''}
+      ${bad.length ? `<div class="err" role="alert">${esc(bad[0])}</div>` : ''}
+    </div><button class="btn primary" id="record" ${probs.length ? 'disabled' : ''} ${probs.length ? `title="${esc(probs[0])}"` : ''}>${ico('check')}Record payment</button>`;
+  $('#record').onclick = record;
+}
+
+async function record() {
+  const btn = $('#record'); btn.disabled = true;
+  const body = {
+    payer_name: val('#f-payer') || null, cheque_no: val('#f-no'), bank: val('#f-bank') || null, cheque_date: $('#f-date').value || null,
+    amount: num('#f-amt'), customer_id: S.customer || null,
+    allocations: [...S.alloc].map(([invoice_id, amount]) => ({ invoice_id, amount })),
+  };
+  try {
+    const r = await api(`/cheques/${S.id}/record`, { method: 'POST', body });
+    const nos = r.payments.map((p) => p.invoice_no).join(', ');
+    notify(`Cheque ${body.cheque_no} recorded: ${kes(body.amount - r.unallocated)} applied to ${nos}`);
+    showDrop(); loadHistory(); refreshPending();
+  } catch (e) { notify(e.message, 'bad'); drawTotals(); }
+}
+
+async function discardCurrent() {
+  if (!(await confirmBox('The photo and what was read from it will be deleted. Nothing has been recorded.', { title: 'Discard this cheque?', ok: 'Discard', danger: true }))) return;
+  try { await api('/cheques/' + S.id, { method: 'DELETE' }); notify('Cheque discarded'); showDrop(); loadHistory(); refreshPending(); } catch (e) { notify(e.message, 'bad'); }
+}
+function refreshPending() {
+  api('/cheques?status=pending').then((l) => { const c = $('#pend-count'); if (!c) return; c.textContent = l.length; c.classList.toggle('hide', !l.length); }).catch(() => {});
+}
+
+/* ------------------------------------------------------------ register */
+const HF = [['all', 'All'], ['pending', 'To review'], ['recorded', 'Recorded'], ['void', 'Void']];
+async function loadHistory() {
+  try { hist = await api('/cheques'); } catch (e) { notify(e.message, 'bad'); }
+  drawHistory();
+}
+function drawHistory() {
+  $('#hf').innerHTML = HF.map(([k, l]) => `<button data-k="${k}" aria-pressed="${k === hfilter}">${l}</button>`).join('');
+  const rows = hist.filter((c) => hfilter === 'all' || c.status === hfilter);
+  if (!rows.length) { $('#history').innerHTML = `<div class="empty"><b>${hist.length ? 'Nothing here' : 'No cheques yet'}</b>${hist.length ? 'Try another filter.' : 'Scanned cheques are listed here with the invoices they paid.'}</div>`; return; }
+  $('#history').innerHTML = `<table class="tbl"><thead><tr><th>Cheque no.</th><th>Paid by</th><th>Bank</th><th class="right">Amount</th><th>Applied to</th><th>Status</th><th>Added</th><th></th></tr></thead><tbody>
+    ${rows.map((c) => `<tr data-id="${c.id}"><td class="two"><b style="font-weight:600">${c.cheque_no ? esc(c.cheque_no) : '<span class="dim">Not read</span>'}</b><span class="sub">${c.cheque_date ? fmtDate(c.cheque_date) : ''}</span></td>
+      <td>${esc(c.payer_name || '-')}</td><td>${esc(c.bank || '-')}</td><td class="right">${c.amount ? kes(c.amount) : '-'}</td>
+      <td>${(c.allocations || []).map((a) => esc(a.invoice_no)).join(', ') || '<span class="dim">-</span>'}</td>
+      <td>${badge(c.status)}${c.status === 'void' && c.void_reason ? `<span class="sub">${esc(c.void_reason)}</span>` : ''}</td>
+      <td class="two">${fmtStamp(c.created_at)}<span class="sub">${esc(c.uploaded_by_name || '')}</span></td>
+      <td class="right" style="white-space:nowrap">
+        ${c.status === 'pending' ? `<button class="btn sm primary" data-a="review">Review</button>` : `<button class="btn sm" data-a="photo">Photo</button>`}
+        ${c.status === 'recorded' && isAdmin() ? `<button class="btn sm danger" data-a="void">Void</button>` : ''}</td></tr>`).join('')}</tbody></table>`;
+}
+$('#hf').onclick = (e) => { const b = e.target.closest('button'); if (b) { hfilter = b.dataset.k; drawHistory(); } };
+$('#history').onclick = async (e) => {
+  const b = e.target.closest('[data-a]'); if (!b) return;
+  const id = +b.closest('tr').dataset.id, c = hist.find((x) => x.id === id);
+  try {
+    if (b.dataset.a === 'review') { showReview(await api('/cheques/' + id)); scrollTo({ top: 0, behavior: 'smooth' }); }
+    if (b.dataset.a === 'photo') { const u = await chequePhoto(id); openModal(`<div class="dlg-h"><h2>Cheque ${esc(c.cheque_no || '')}</h2>${closeBtn}</div><div class="dlg-b"><img src="${u}" alt="Cheque photo" style="width:100%;border-radius:10px"></div>`, true); }
+    if (b.dataset.a === 'void') voidDialog(c);
+  } catch (err) { notify(err.message, 'bad'); }
+};
+function voidDialog(c) {
+  const d = openModal(`<div class="dlg-h"><div><h2>Void cheque ${esc(c.cheque_no)}?</h2><p class="muted">Use this when a cheque bounces or is cancelled.</p></div>${closeBtn}</div>
+    <div class="dlg-b"><p>The ${(c.allocations || []).length} payment(s) it made, ${kes(c.amount)} in total, are removed and invoice(s) ${esc((c.allocations || []).map((a) => a.invoice_no).join(', '))} become unpaid again. The cheque and its photo stay in the register.</p>
+      <div class="field"><label for="v-r">Reason</label><input class="in" id="v-r" placeholder="e.g. Bounced, insufficient funds" maxlength="200"></div><p class="err" id="v-e" role="alert"></p></div>
+    <div class="dlg-f"><button class="btn" data-close>Keep it</button><button class="btn danger" id="v-go">Void cheque</button></div>`);
+  $('#v-go', d).onclick = async () => {
+    try { const r = await api(`/cheques/${c.id}/void`, { method: 'POST', body: { reason: $('#v-r', d).value.trim() } }); d.close(); notify(r.message); loadHistory(); }
+    catch (e) { $('#v-e', d).textContent = e.message; }
+  };
+}
+
+if (init({ active: 'cheques', title: 'Cheques' })) { showDrop(); loadHistory(); }
+</script>
+</body>
+</html>

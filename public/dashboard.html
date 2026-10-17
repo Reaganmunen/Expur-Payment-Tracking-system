@@ -1,22 +1,193 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dashboard · Expur</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="/css/style.css" rel="stylesheet"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Ctext x='16' y='23' font-size='19' font-weight='700' text-anchor='middle' fill='white' font-family='Arial'%3EE%3C/text%3E%3C/svg%3E"></head><body><div id="nav"></div><div class="container pb-5"><div id="alerts"></div>
-<h4 class="mb-3">Dashboard</h4><div class="row g-3 mb-4" id="cards"></div><div id="extra"></div>
-</div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script><script src="/js/app.js"></script><script>
-const card = (t, v, c = '') => `<div class="col-6 col-lg-3"><div class="card kpi"><div class="card-body"><div class="text-muted small">${t}</div><div class="fs-5 fw-bold ${c}">${v}</div></div></div></div>`;
-(async () => { if (!init('dashboard')) return;
- try {
-  if (isAdmin()) {
-   const [d, od, by] = await Promise.all([api('/reports/dashboard'), api('/reports/overdue'), api('/reports/sales-by-user')]);
-   cards.innerHTML = card('Outstanding', kes(d.outstanding)) + card('Overdue (' + d.overdue_count + ')', kes(d.overdue), 'text-danger') +
-    card('Collected this month', kes(d.collected_this_month), 'text-success') + card('Revenue this month', kes(d.revenue_this_month)) +
-    card('Expenses this month', kes(d.expenses_this_month)) +
-    card('Net profit this month', kes(d.net_profit_this_month), d.net_profit_this_month < 0 ? 'text-danger' : 'text-success');
-   extra.innerHTML = '<h6>Overdue invoices</h6><table class="table table-sm bg-white"><tr><th>No.</th><th>Customer</th><th>Days late</th><th class="text-end">Balance</th></tr>' +
-    (od.map(i => `<tr><td>${esc(i.invoice_no)}</td><td>${esc(i.customer)}</td><td>${i.days_overdue}</td><td class="text-end">${kes(i.balance)}</td></tr>`).join('') || '<tr><td colspan=4 class="text-muted">None</td></tr>') +
-    '</table><h6 class="mt-4">Sales by seller</h6><table class="table table-sm bg-white"><tr><th>Seller</th><th>Invoices</th><th class="text-end">Sales</th><th class="text-end">Collected</th><th class="text-end">Outstanding</th><th class="text-end">Gross profit</th></tr>' +
-    by.map(s => `<tr><td>${esc(s.seller)}</td><td>${s.invoices}</td><td class="text-end">${kes(s.total_sales)}</td><td class="text-end">${kes(s.collected)}</td><td class="text-end">${kes(s.outstanding)}</td><td class="text-end">${kes(s.gross_profit)}</td></tr>`).join('') + '</table>';
-  } else {
-   const s = await api('/reports/my-sales');
-   cards.innerHTML = card('My invoices', s.invoices) + card('My sales', kes(s.total_sales)) + card('Collected', kes(s.collected), 'text-success') + card('Outstanding', kes(s.outstanding), 'text-danger');
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overview - Expur</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2317151f'/%3E%3Ctext x='16' y='22.5' font-family='Arial' font-weight='700' font-size='18' text-anchor='middle' fill='white'%3EE%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<main class="view" id="view">
+  <div class="cols">
+    <div class="stack">
+      <section class="card"><div class="kpis" id="kpis"></div></section>
+
+      <section class="card" id="chart-card">
+        <div class="card-h">Money in and out
+          <div class="right-slot"><div class="seg" id="metric" role="group" aria-label="Chart figure">
+            <button data-m="revenue" aria-pressed="true">Invoiced</button><button data-m="cash_collected" aria-pressed="false">Collected</button><button data-m="expenses" aria-pressed="false">Expenses</button>
+          </div></div></div>
+        <div class="card-b">
+          <div class="chart-head"><div><div class="big" id="chart-total">&nbsp;</div><div class="delta" id="chart-delta"></div></div></div>
+          <div class="chart" id="chart"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-h" id="recent-h">Recent payments<div class="right-slot"><a class="btn sm" href="/invoices.html">All invoices</a></div></div>
+        <div class="card-b flush tbl-wrap" id="recent"></div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="card">
+        <div class="card-h">Collection rate<div class="right-slot"><a class="icon-btn" href="/invoices.html" aria-label="Open invoices">&#8599;</a></div></div>
+        <div class="card-b" id="gauge"></div>
+      </section>
+      <section class="card"><div class="card-b" id="follow"></div></section>
+      <section class="card"><div class="card-b" id="owed"></div></section>
+    </div>
+  </div>
+</main>
+<script src="/js/app.js"></script>
+<script>
+const PALETTE = ['#6a12de', '#f2780c', '#2f6beb', '#c9c6d6'];
+const MONTHS = [];   // last 12 months, oldest first: {key:'2026-10', label:'Oct'}
+{
+  const [y, m] = today().split('-').map(Number);
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(Date.UTC(y, m - 1 - i, 1));
+    MONTHS.push({ key: d.toISOString().slice(0, 7), label: d.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' }), full: d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' }) });
   }
- } catch (e) { notify(e.message); } })();
-</script></body></html>
+}
+
+async function start() {
+  try {
+    if (admin) await adminView(); else await staffView();
+  } catch (e) { notify(e.message, 'bad'); }
+}
+
+const admin = isAdmin();
+/* ------------------------------------------------------------ pieces */
+const kpi = (icon, tone, label, value, sub) => `<div class="kpi"><div class="kpi-h"><span class="chip ${tone}">${ico(icon)}</span>${label}</div><div class="big">${value}</div>${sub}</div>`;
+
+function gauge(rate, caption) {
+  const R = 78, C = 2 * Math.PI * R, frac = rate === null ? 0 : Math.max(0, Math.min(1, rate));
+  const a = (135 + 270 * frac) * Math.PI / 180;
+  const dot = rate === null ? '' : `<circle cx="${100 + R * Math.cos(a)}" cy="${100 + R * Math.sin(a)}" r="7" fill="#f2780c" stroke="#fff" stroke-width="3"/>`;
+  return `<div class="gauge"><svg viewBox="0 0 200 200" role="img" aria-label="${rate === null ? 'No invoices yet' : Math.round(frac * 100) + ' percent paid'}">
+      <g transform="rotate(135 100 100)" fill="none" stroke-width="14" stroke-linecap="round">
+        <circle cx="100" cy="100" r="${R}" stroke="#ffe3c8" stroke-dasharray="${.75 * C} ${C}"/>
+        <circle cx="100" cy="100" r="${R}" stroke="#f2780c" stroke-dasharray="${.75 * C * frac} ${C}" ${frac === 0 ? 'opacity="0"' : ''}/></g>${dot}</svg>
+    <div class="mid"><b>${rate === null ? '-' : Math.round(frac * 100) + '<small>%</small>'}</b><span>paid</span></div></div>
+    <p class="muted" style="text-align:center;margin-top:6px">${caption}</p>`;
+}
+
+function followList(rows) {
+  const top = rows.slice(0, 4);
+  return `<div class="side-title">Needs follow-up</div>` + (top.length ? `<div class="inset">${top.map((r) => {
+    const d = Number(r.days_overdue) || 0;
+    return `<a class="row-i" href="/invoices.html?open=${r.id}"><span class="ring">${ico('clock')}</span>
+      <span class="row-t"><b>${esc(r.customer)}</b><small>Invoice ${esc(r.invoice_no)}, ${kes(r.balance)}</small></span>
+      <span class="pill ${d > 30 ? 'bad' : 'warn'}">${d}d late</span></a>`;
+  }).join('')}</div>` : `<div class="inset"><div class="empty"><b>Nothing overdue</b>Every invoice is within its due date.</div></div>`);
+}
+
+function owedBlock(list) {
+  const total = list.reduce((s, x) => s + Number(x.balance), 0);
+  const top = list.slice(0, 3), rest = list.slice(3).reduce((s, x) => s + Number(x.balance), 0);
+  const items = [...top.map((x) => ({ n: x.customer, v: Number(x.balance) })), ...(rest > 0 ? [{ n: 'Everyone else', v: rest }] : [])];
+  if (!total) return `<div class="side-title">Who owes you</div><div class="inset"><div class="empty"><b>No unpaid balances</b>Nobody owes you anything right now.</div></div>`;
+  return `<div class="side-title">Who owes you</div><div class="inset">
+    <div class="stackbar" role="img" aria-label="Unpaid balances by customer">${items.map((x, i) => `<i style="flex:${x.v};background:${PALETTE[i]}"></i>`).join('')}</div>
+    <div class="legend">${items.map((x, i) => `<div><i style="background:${PALETTE[i]}"></i><span>${esc(x.n)}</span><em>${(x.v / total * 100).toFixed(1)}%</em></div>`).join('')}</div></div>`;
+}
+
+function recentTable(rows) {
+  if (!rows.length) return `<div class="empty"><b>No payments yet</b>Payments you record will show up here.</div>`;
+  return `<table class="tbl"><thead><tr><th>Date</th><th>Invoice</th><th>Customer</th><th>Method</th><th class="right">Amount</th></tr></thead><tbody>${rows.map((p) => `
+    <tr class="click" onclick="location.href='/invoices.html?open=${p.invoice_id}'"><td>${fmtStamp(p.paid_at)}</td><td>${esc(p.invoice_no)}</td><td>${esc(p.customer)}</td>
+    <td>${esc(methodLabel(p.method))}</td><td class="right">${kes(p.amount)}</td></tr>`).join('')}</tbody></table>`;
+}
+
+/* ------------------------------------------------------------ chart */
+function niceMax(v) {
+  if (v <= 0) return 100;
+  const p = Math.pow(10, Math.floor(Math.log10(v))), m = v / p;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p;
+}
+let series = [], metric = 'revenue', active = MONTHS.length - 1;
+
+function drawChart() {
+  const vals = series.map((s) => Number(s[metric]) || 0), max = niceMax(Math.max(...vals));
+  const total = vals.reduce((a, b) => a + b, 0);
+  $('#chart-total').innerHTML = money(total);
+  $('#chart-delta').innerHTML = `<span class="muted">Last 12 months.</span> ` + (pct(vals[11], vals[10]) === null ? '' : delta(vals[11], vals[10], metric !== 'expenses', 'this month so far vs all of last month'));
+  $('#chart').innerHTML = `<div class="plot" id="plot">
+      ${[0, 1, 2, 3, 4].map((i) => `<div class="grid-l" style="bottom:${i * 25}%"><span>${compact(max * i / 4)}</span></div>`).join('')}
+      ${vals.map((v, i) => `<button class="bar" data-i="${i}" aria-pressed="${i === active}" aria-label="${MONTHS[i].full}: ${kes(v)}"><i style="height:${v / max * 100}%"></i></button>`).join('')}
+    </div>
+    <div class="xs">${MONTHS.map((m) => `<span>${m.label}</span>`).join('')}</div><div class="tip" id="tip"></div>`;
+  $$('.bar').forEach((b) => {
+    const pick = () => { active = +b.dataset.i; $$('.bar').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); tip(); };
+    b.onmouseenter = b.onfocus = b.onclick = pick;
+  });
+  tip();
+}
+function tip() {
+  const s = series[active], t = $('#tip'), b = $$('.bar')[active], c = $('#chart');
+  const row = (l, v) => `<div>${l}<em>${kes(v)}</em></div>`;
+  t.innerHTML = `<b>${MONTHS[active].full}</b>${row('Invoiced', s.revenue)}${row('Collected', s.cash_collected)}${row('Expenses', s.expenses)}${row('Net profit', s.net_profit)}`;
+  const cr = c.getBoundingClientRect(), br = b.getBoundingClientRect(), ir = b.firstElementChild.getBoundingClientRect();
+  t.style.left = Math.max(110, Math.min(cr.width - 110, br.left - cr.left + br.width / 2)) + 'px';
+  t.style.top = Math.max(120, ir.top - cr.top - 8) + 'px';
+}
+$('#metric').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  metric = b.dataset.m;
+  $$('#metric button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  drawChart();
+};
+window.addEventListener('resize', () => series.length && tip());
+
+/* ------------------------------------------------------------ admin */
+async function adminView() {
+  const [d, pnl, over, owed, pays] = await Promise.all([
+    api('/reports/dashboard'), api('/reports/monthly-pnl'), api('/reports/overdue'), api('/reports/outstanding-by-customer'), api('/payments?limit=6'),
+  ]);
+  $('#kpis').innerHTML =
+    kpi('coins', 'p', 'Still to collect', money(d.outstanding), `<span class="delta"><b>${d.unpaid_count}</b> unpaid invoice${d.unpaid_count == 1 ? '' : 's'}, <b class="${d.overdue_count > 0 ? 'down' : ''}">${d.overdue_count}</b> overdue</span>`) +
+    kpi('check', 'o', 'Collected this month', money(d.collected_this_month), delta(+d.collected_this_month, +d.collected_last_month, true, 'vs all of last month')) +
+    kpi('trend', 'b', 'Net profit this month', money(d.net_profit_this_month), delta(+d.net_profit_this_month, +d.net_profit_last_month, true, 'vs all of last month'));
+
+  const by = Object.fromEntries(pnl.map((r) => [String(r.month).slice(0, 7), r]));
+  series = MONTHS.map((m) => by[m.key] || { revenue: 0, cash_collected: 0, expenses: 0, net_profit: 0 });
+  drawChart();
+
+  const inv = +d.invoiced_90d;
+  $('#gauge').innerHTML = gauge(inv > 0 ? +d.paid_90d / inv : null, inv > 0 ? `${kes(d.paid_90d)} of the ${kes(inv)} invoiced in the last 90 days` : 'No invoices in the last 90 days');
+  $('#follow').innerHTML = followList(over.sort((a, b) => b.days_overdue - a.days_overdue));
+  $('#owed').innerHTML = owedBlock(owed);
+  $('#recent').innerHTML = recentTable(pays);
+}
+
+/* ------------------------------------------------------------ staff */
+async function staffView() {
+  $('#chart-card').classList.add('hide');
+  const [s, list, pays] = await Promise.all([api('/reports/my-sales'), api('/invoices'), api('/payments?limit=6')]);
+  $('#kpis').innerHTML =
+    kpi('invoice', 'p', 'My sales', money(s.total_sales), `<span class="delta"><b>${s.invoices}</b> invoice${s.invoices == 1 ? '' : 's'}</span>`) +
+    kpi('check', 'o', 'Collected', money(s.collected), `<span class="delta">Paid so far on my invoices</span>`) +
+    kpi('coins', 'b', 'Still to collect', money(s.outstanding), `<span class="delta">Unpaid on my invoices</span>`);
+  const ts = +s.total_sales;
+  $('#gauge').innerHTML = gauge(ts > 0 ? +s.collected / ts : null, ts > 0 ? `${kes(s.collected)} of ${kes(ts)} collected` : 'No sales yet');
+  const today_ = today();
+  $('#follow').innerHTML = followList(list.filter((i) => i.status === 'OVERDUE').map((i) => ({ ...i, days_overdue: Math.round((Date.parse(today_) - Date.parse(String(i.due_date).slice(0, 10))) / 864e5) })).sort((a, b) => b.days_overdue - a.days_overdue));
+  const m = new Map();
+  list.filter((i) => ['UNPAID', 'PARTIAL', 'OVERDUE'].includes(i.status)).forEach((i) => m.set(i.customer, (m.get(i.customer) || 0) + Number(i.balance)));
+  $('#owed').innerHTML = owedBlock([...m].map(([customer, balance]) => ({ customer, balance })).sort((a, b) => b.balance - a.balance));
+  $('#recent').innerHTML = recentTable(pays);
+}
+
+if (init({
+  active: 'dashboard', title: 'Overview', search: true,
+  actions: `<button class="btn" id="exp">${ico('download')}Export CSV</button>` + headerBtn('/cheques.html', 'scan', 'Scan cheque') + headerBtn('/invoice-new.html', 'plus', 'New invoice', true),
+})) {
+  $('#exp').onclick = openExport;
+  start();
+}
+
+</script>
+</body>
+</html>

@@ -1,33 +1,166 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Invoices · Expur</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="/css/style.css" rel="stylesheet"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Ctext x='16' y='23' font-size='19' font-weight='700' text-anchor='middle' fill='white' font-family='Arial'%3EE%3C/text%3E%3C/svg%3E"></head><body><div id="nav"></div><div class="container pb-5"><div id="alerts"></div>
-<div class="d-flex justify-content-between mb-3"><h4>Invoices</h4>
-<div class="d-flex gap-2"><input id="q" class="form-control" placeholder="Search invoice no., delivery note, customer"><select id="st" class="form-select w-auto"><option value="">All</option><option value="outstanding">Outstanding</option><option>unpaid</option><option>partial</option><option>overdue</option><option>paid</option></select></div></div>
-<div class="table-responsive"><table class="table table-hover bg-white"><thead><tr><th>Invoice no.</th><th>Delivery note</th><th>Customer</th><th>Date</th><th>Due</th><th class="text-end">Total</th><th class="text-end">Balance</th><th>Status</th><th>Seller</th></tr></thead><tbody id="rows"></tbody></table></div>
-<div class="modal fade" id="md"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-body" id="mb"></div></div></div></div>
-</div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script><script src="/js/app.js"></script><script>
-let modal;
-async function load() { try {
-  const qs = new URLSearchParams(); if (st.value) qs.set('status', st.value); if (q.value.trim()) qs.set('search', q.value.trim());
-  const l = await api('/invoices' + (qs.toString() ? '?' + qs : ''));
-  rows.innerHTML = l.map(i => `<tr role="button" onclick="open_(${i.id})"><td>${esc(i.invoice_no)}</td><td>${esc(i.delivery_note_no || '')}</td><td>${esc(i.customer)}</td><td>${i.issue_date}</td><td>${i.due_date}</td><td class="text-end">${kes(i.total)}</td><td class="text-end">${kes(i.balance)}</td><td>${badge(i.status)}</td><td>${esc(i.seller || '')}</td></tr>`).join('') || '<tr><td colspan=9 class="text-muted">No invoices</td></tr>';
-} catch (e) { notify(e.message); } }
-async function open_(id) { try {
-  const v = await api('/invoices/' + id), canPay = v.balance > 0 && v.status !== 'WRITTEN_OFF';
-  mb.innerHTML = `<div class="d-flex justify-content-between"><h5>${esc(v.invoice_no)} ${badge(v.status)}</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
-  <p class="text-muted">${esc(v.customer)} · Delivery note: ${esc(v.delivery_note_no || '—')} · due ${v.due_date}</p>
-  <table class="table table-sm"><tr><th>Item</th><th>Qty</th><th class="text-end">Price</th><th class="text-end">Total</th></tr>${v.items.map(i => `<tr><td>${esc(i.product)}</td><td>${i.quantity}</td><td class="text-end">${kes(i.unit_price)}</td><td class="text-end">${kes(i.line_total)}</td></tr>`).join('')}</table>
-  <p class="text-end mb-1">Total <b>${kes(v.total)}</b> · Paid ${kes(v.paid)} · Balance <b>${kes(v.balance)}</b></p>
-  <h6>Payments</h6><ul class="list-group mb-3">${v.payments.map(p => `<li class="list-group-item d-flex justify-content-between"><span>${new Date(p.paid_at).toLocaleDateString()} · ${p.method} ${esc(p.reference || '')}</span><b>${kes(p.amount)}</b></li>`).join('') || '<li class="list-group-item text-muted">None yet</li>'}</ul>
-  ${canPay ? `<form class="row g-2" onsubmit="pay(event,${v.id})"><div class="col-4"><input id="pa" type="number" step="0.01" max="${v.balance}" class="form-control" placeholder="Amount" required></div>
-  <div class="col-3"><select id="pm" class="form-select"><option>mpesa</option><option>cash</option><option>bank</option><option>cheque</option></select></div>
-  <div class="col-3"><input id="pr" class="form-control" placeholder="M-Pesa code"></div><div class="col-2"><button class="btn btn-success w-100">Pay</button></div></form>` : ''}
-  ${isAdmin() ? `<button class="btn btn-sm btn-outline-danger mt-3" onclick="wo(${v.id},${v.status === 'WRITTEN_OFF'})">${v.status === 'WRITTEN_OFF' ? 'Reverse write-off' : 'Write off as bad debt'}</button>` : ''}`;
-  (modal ||= new bootstrap.Modal(md)).show();
-} catch (e) { notify(e.message); } }
-async function pay(e, id) { e.preventDefault(); try {
-  await api('/payments', { method: 'POST', body: { invoice_id: id, amount: +pa.value, method: pm.value, reference: pr.value || undefined } });
-  await load(); open_(id);
-} catch (err) { notify(err.message); modal.hide(); } }
-async function wo(id, rev) { if (!confirm(rev ? 'Reverse write-off?' : 'Write off this invoice as bad debt?')) return; try {
-  await api('/invoices/' + id + '/write-off', { method: rev ? 'DELETE' : 'POST' }); await load(); open_(id); } catch (e) { notify(e.message); } }
-st.onchange = load; q.oninput = () => { clearTimeout(window.qt); window.qt = setTimeout(load, 300); }; if (init('invoices')) load();
-</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoices - Expur</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2317151f'/%3E%3Ctext x='16' y='22.5' font-family='Arial' font-weight='700' font-size='18' text-anchor='middle' fill='white'%3EE%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<main class="view" id="view">
+  <div class="stack">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+      <div class="seg" id="filters" role="group" aria-label="Filter invoices"></div>
+      <span class="muted" id="count" style="margin-left:auto"></span>
+    </div>
+    <section class="card"><div class="tbl-wrap" id="list"><div class="empty">Loading...</div></div></section>
+  </div>
+</main>
+<script src="/js/app.js"></script>
+<script>
+const FILTERS = [['all', 'All'], ['open', 'Not paid'], ['OVERDUE', 'Overdue'], ['PARTIAL', 'Part paid'], ['PAID', 'Paid']];
+const params = new URLSearchParams(location.search);
+let all = [], filter = 'all', term = (params.get('q') || '').trim().toLowerCase(), flashNo = params.get('new');
+
+const matches = (i) => {
+  if (filter === 'open' && !['UNPAID', 'PARTIAL', 'OVERDUE'].includes(i.status)) return false;
+  if (!['all', 'open'].includes(filter) && i.status !== filter) return false;
+  if (!term) return true;
+  return [i.invoice_no, i.delivery_note_no, i.customer].some((v) => String(v || '').toLowerCase().includes(term));
+};
+
+function drawFilters() {
+  $('#filters').innerHTML = FILTERS.map(([k, l]) => `<button data-k="${k}" aria-pressed="${k === filter}">${l}</button>`).join('');
+}
+function draw() {
+  const rows = all.filter(matches);
+  $('#count').textContent = `${rows.length} invoice${rows.length === 1 ? '' : 's'}`;
+  if (!rows.length) {
+    $('#list').innerHTML = `<div class="empty"><b>${all.length ? 'No invoices match' : 'No invoices yet'}</b>${all.length ? 'Try a different filter or search.' : 'Create your first invoice to see it here.'}</div>`;
+    return;
+  }
+  const owed = rows.filter((r) => r.status !== 'WRITTEN_OFF').reduce((s, r) => s + Number(r.balance), 0);
+  $('#list').innerHTML = `<table class="tbl"><thead><tr><th>Invoice no.</th><th>Delivery note</th><th>Customer</th><th>Issued</th><th>Due</th><th class="right">Total</th><th class="right">Balance</th><th>Status</th></tr></thead>
+    <tbody>${rows.map((i) => `<tr class="click ${String(i.invoice_no) === flashNo ? 'flash' : ''}" data-id="${i.id}">
+      <td><b style="font-weight:600">${esc(i.invoice_no)}</b></td><td>${i.delivery_note_no ? esc(i.delivery_note_no) : '<span class="dim">-</span>'}</td>
+      <td>${esc(i.customer)}</td><td>${fmtDate(i.issue_date)}</td><td>${fmtDate(i.due_date)}</td>
+      <td class="right">${kes(i.total)}</td><td class="right">${Number(i.balance) > 0 && i.status !== 'WRITTEN_OFF' ? kes(i.balance) : '<span class="dim">-</span>'}</td><td>${badge(i.status)}</td></tr>`).join('')}</tbody>
+    <tfoot><tr><th colspan="6">Still to collect on these</th><td class="right">${kes(owed)}</td><td></td></tr></tfoot></table>`;
+}
+
+async function load() {
+  try { all = await api('/invoices'); } catch (e) { notify(e.message, 'bad'); }
+  draw();
+  const open = params.get('open');
+  if (open) { params.delete('open'); openInvoice(+open); }
+}
+
+$('#filters').onclick = (e) => { const b = e.target.closest('button'); if (b) { filter = b.dataset.k; drawFilters(); draw(); } };
+$('#list').onclick = (e) => { const tr = e.target.closest('tr[data-id]'); if (tr) openInvoice(+tr.dataset.id); };
+
+/* ------------------------------------------------------------ detail drawer */
+async function openInvoice(id) {
+  let inv;
+  try { inv = await api('/invoices/' + id); } catch (e) { return notify(e.message, 'bad'); }
+  const owing = Number(inv.balance) > 0 && inv.status !== 'WRITTEN_OFF';
+  const hint = { mpesa: 'M-Pesa code, e.g. SJK12ABC34', bank: 'Bank reference', cheque: 'Cheque number', cash: 'Optional note' };
+
+  const d = openDrawer(`<div>
+    <div class="dlg-h"><div><h2>Invoice ${esc(inv.invoice_no)}</h2><p class="muted">${esc(inv.customer)}</p></div>${badge(inv.status)}${closeBtn}</div>
+    <div class="dlg-b">
+      <div class="kv">
+        <div><small>Delivery note</small><b>${inv.delivery_note_no ? esc(inv.delivery_note_no) : '-'}</b></div>
+        <div><small>Seller</small><b>${esc(inv.seller || '-')}</b></div>
+        <div><small>Issued</small><b>${fmtDate(inv.issue_date)}</b></div>
+        <div><small>Due</small><b>${fmtDate(inv.due_date)}</b></div>
+        ${inv.notes ? `<div style="grid-column:1/-1"><small>Notes</small><b>${esc(inv.notes)}</b></div>` : ''}
+      </div>
+      <div class="stats"><div><small>Total</small><b>${kes(inv.total)}</b></div><div><small>Paid</small><b>${kes(inv.paid)}</b></div><div><small>Balance</small><b>${kes(inv.balance)}</b></div></div>
+
+      <div><div class="sec-t">Items</div><div class="inset tbl-wrap"><table class="tbl"><tbody>
+        ${inv.items.map((it) => `<tr><td>${esc(it.product)}<span class="sub">${Number(it.quantity)} x ${kes(it.unit_price)}</span></td><td class="right">${kes(it.line_total)}</td></tr>`).join('')}
+      </tbody></table></div></div>
+
+      <div><div class="sec-t">Payments</div>${inv.payments.length ? `<div class="inset tbl-wrap"><table class="tbl"><tbody>${inv.payments.map((p) => `
+        <tr><td>${esc(methodLabel(p.method))}<span class="sub">${fmtStamp(p.paid_at)}${p.reference ? ', ' + esc(p.reference) : ''}</span></td><td class="right">${kes(p.amount)}</td></tr>`).join('')}</tbody></table></div>`
+        : `<p class="muted">No payments recorded yet.</p>`}</div>
+
+      ${owing ? `<form id="pay" class="stack" style="gap:12px" novalidate><div class="sec-t" style="margin:0">Record a payment</div>
+        <div class="form-grid">
+          <div class="field c6"><label for="p-amt">Amount (KES)</label><input class="in" id="p-amt" type="number" step="0.01" min="0.01" max="${inv.balance}" value="${inv.balance}" required></div>
+          <div class="field c6"><label for="p-m">Method</label><select class="in" id="p-m"><option value="mpesa">M-Pesa</option><option value="cash">Cash</option><option value="bank">Bank transfer</option><option value="cheque">Cheque</option></select></div>
+          <div class="field c12"><label for="p-ref">Reference</label><input class="in" id="p-ref" placeholder="${hint.mpesa}" autocomplete="off"><span class="hint" id="p-hint"></span></div>
+        </div>
+        <p class="err" id="p-err" role="alert"></p>
+        <button class="btn primary" type="submit">Record payment</button></form>` : ''}
+
+      ${isAdmin() ? `<div><div class="sec-t">Admin</div><div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn sm" id="edit">${ico('edit')}Edit numbers and dates</button>
+        ${inv.status === 'WRITTEN_OFF' ? `<button class="btn sm" id="unwo">Reverse write-off</button>` : Number(inv.balance) > 0 ? `<button class="btn sm danger" id="wo">Write off as bad debt</button>` : ''}</div>
+        <form id="ed" class="hide stack" style="margin-top:14px;gap:12px" novalidate><div class="form-grid">
+          <div class="field c6"><label for="e-no">Invoice no.</label><input class="in" id="e-no" value="${esc(inv.invoice_no)}" maxlength="50"></div>
+          <div class="field c6"><label for="e-dn">Delivery note no.</label><input class="in" id="e-dn" value="${esc(inv.delivery_note_no || '')}" maxlength="50"></div>
+          <div class="field c6"><label for="e-is">Issued</label><input class="in" id="e-is" type="date" value="${String(inv.issue_date).slice(0, 10)}"></div>
+          <div class="field c6"><label for="e-du">Due</label><input class="in" id="e-du" type="date" value="${String(inv.due_date).slice(0, 10)}"></div>
+          <div class="field c12"><label for="e-nt">Notes</label><input class="in" id="e-nt" value="${esc(inv.notes || '')}"></div></div>
+          <p class="err" id="e-err" role="alert"></p><button class="btn primary" type="submit">Save changes</button></form></div>` : ''}
+    </div></div>`);
+
+  const pay = $('#pay', d);
+  if (pay) {
+    const m = $('#p-m', d), ref = $('#p-ref', d);
+    const sync = () => {
+      ref.placeholder = hint[m.value];
+      $('#p-hint', d).innerHTML = m.value === 'cheque' ? `Have the cheque with you? <a href="/cheques.html" style="color:var(--accent);font-weight:500">Scan it instead</a> and the details fill in for you.` : '';
+    };
+    m.onchange = sync; sync();
+    pay.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const btn = $('button', pay), err = $('#p-err', d); err.textContent = '';
+      const amount = +$('#p-amt', d).value;
+      if (!(amount > 0)) { err.textContent = 'Enter an amount greater than zero.'; return; }
+      btn.disabled = true;
+      try {
+        await api('/payments', { method: 'POST', body: { invoice_id: id, amount, method: m.value, reference: ref.value.trim() || undefined } });
+        d.close(); notify(`Payment of ${kes(amount)} recorded on ${inv.invoice_no}`); load();
+      } catch (e) { err.textContent = e.message; btn.disabled = false; }
+    };
+  }
+  if (isAdmin()) {
+    $('#edit', d).onclick = () => { $('#ed', d).classList.toggle('hide'); };
+    $('#ed', d).onsubmit = async (ev) => {
+      ev.preventDefault();
+      const btn = $('#ed button[type=submit]', d), err = $('#e-err', d); err.textContent = '';
+      btn.disabled = true;
+      try {
+        const u = await api('/invoices/' + id, { method: 'PUT', body: {
+          invoice_no: $('#e-no', d).value.trim(), delivery_note_no: $('#e-dn', d).value.trim(),
+          issue_date: $('#e-is', d).value || undefined, due_date: $('#e-du', d).value || undefined, notes: $('#e-nt', d).value } });
+        d.close(); notify(`Saved. Invoice ${u.invoice_no} updated.`); flashNo = u.invoice_no; load();
+      } catch (e) { err.textContent = e.message; btn.disabled = false; }
+    };
+    const wo = $('#wo', d), unwo = $('#unwo', d);
+    if (wo) wo.onclick = async () => {
+      if (!(await confirmBox(`This moves ${kes(inv.balance)} to bad debt and takes it out of what you are owed.`, { title: 'Write off this invoice?', ok: 'Write off', danger: true }))) return;
+      try { await api(`/invoices/${id}/write-off`, { method: 'POST' }); d.close(); notify('Invoice written off'); load(); } catch (e) { notify(e.message, 'bad'); }
+    };
+    if (unwo) unwo.onclick = async () => { try { await api(`/invoices/${id}/write-off`, { method: 'DELETE' }); d.close(); notify('Write-off reversed'); load(); } catch (e) { notify(e.message, 'bad'); } };
+  }
+}
+
+if (init({
+  active: 'invoices', title: 'Invoices', search: true,
+  actions: `<button class="btn" id="exp">${ico('download')}Export to Excel</button>` + headerBtn('/invoice-new.html', 'plus', 'New invoice', true),
+})) {
+  $('#exp').onclick = openExport;
+  const gs = $('#gsearch');
+  gs.value = params.get('q') || '';
+  gs.addEventListener('input', () => { term = gs.value.trim().toLowerCase(); draw(); });
+  window.onSearch = () => {};
+  drawFilters();
+  load();
+}
+</script>
+</body>
+</html>

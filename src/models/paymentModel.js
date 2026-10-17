@@ -2,7 +2,7 @@ const { query, withTransaction } = require('../config/db');
 const ApiError = require('../utils/ApiError');
 
 // created_by filters on the invoice's seller (used to scope staff)
-exports.getAll = async ({ invoice_id, from, to, created_by } = {}) => {
+exports.getAll = async ({ invoice_id, from, to, created_by, limit } = {}) => {
   const cond = [];
   const params = [];
   if (invoice_id) { params.push(invoice_id); cond.push(`p.invoice_id = $${params.length}`); }
@@ -10,11 +10,11 @@ exports.getAll = async ({ invoice_id, from, to, created_by } = {}) => {
   if (to) { params.push(to); cond.push(`p.paid_at < ($${params.length}::date + 1)`); }
   if (created_by) { params.push(created_by); cond.push(`i.created_by = $${params.length}`); }
   const { rows } = await query(
-    `SELECT p.*, i.invoice_no, c.name AS customer, u.name AS recorded_by_name
+    `SELECT p.*, i.invoice_no, i.delivery_note_no, c.name AS customer, u.name AS recorded_by_name
      FROM payments p JOIN invoices i ON i.id = p.invoice_id
      JOIN customers c ON c.id = i.customer_id
      LEFT JOIN users u ON u.id = p.recorded_by
-     ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''} ORDER BY p.paid_at DESC`, params);
+     ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''} ORDER BY p.paid_at DESC ${Number(limit) > 0 ? 'LIMIT ' + Math.min(Math.floor(Number(limit)), 500) : ''}`, params);
   return rows;
 };
 

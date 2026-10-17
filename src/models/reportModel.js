@@ -10,7 +10,14 @@ exports.dashboard = async () =>
       (SELECT COALESCE(SUM(amount),0) FROM payments WHERE paid_at >= date_trunc('month', now())) AS collected_this_month,
       COALESCE((SELECT revenue FROM monthly_pnl WHERE month = date_trunc('month', CURRENT_DATE)::date),0) AS revenue_this_month,
       COALESCE((SELECT expenses FROM monthly_pnl WHERE month = date_trunc('month', CURRENT_DATE)::date),0) AS expenses_this_month,
-      COALESCE((SELECT net_profit FROM monthly_pnl WHERE month = date_trunc('month', CURRENT_DATE)::date),0) AS net_profit_this_month
+      COALESCE((SELECT net_profit FROM monthly_pnl WHERE month = date_trunc('month', CURRENT_DATE)::date),0) AS net_profit_this_month,
+      (SELECT COALESCE(SUM(amount),0) FROM payments
+         WHERE paid_at >= date_trunc('month', now()) - interval '1 month' AND paid_at < date_trunc('month', now())) AS collected_last_month,
+      COALESCE((SELECT revenue FROM monthly_pnl WHERE month = (date_trunc('month', CURRENT_DATE) - interval '1 month')::date),0) AS revenue_last_month,
+      COALESCE((SELECT expenses FROM monthly_pnl WHERE month = (date_trunc('month', CURRENT_DATE) - interval '1 month')::date),0) AS expenses_last_month,
+      COALESCE((SELECT net_profit FROM monthly_pnl WHERE month = (date_trunc('month', CURRENT_DATE) - interval '1 month')::date),0) AS net_profit_last_month,
+      (SELECT COALESCE(SUM(total),0) FROM invoice_summary WHERE issue_date >= CURRENT_DATE - 90 AND status <> 'WRITTEN_OFF') AS invoiced_90d,
+      (SELECT COALESCE(SUM(paid),0)  FROM invoice_summary WHERE issue_date >= CURRENT_DATE - 90 AND status <> 'WRITTEN_OFF') AS paid_90d
   `)).rows[0];
 
 exports.monthlyPnl = async ({ from, to } = {}) => {

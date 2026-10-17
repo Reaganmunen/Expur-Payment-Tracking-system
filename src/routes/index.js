@@ -9,6 +9,7 @@ router.use('/customers', require('./customerRoutes'));
 router.use('/products', require('./productRoutes'));
 router.use('/invoices', require('./invoiceRoutes'));
 router.use('/payments', require('./paymentRoutes'));
+router.use('/cheques', require('./chequeRoutes'));
 router.use('/expenses', require('./expenseRoutes'));
 router.use('/reports', require('./reportRoutes'));
 

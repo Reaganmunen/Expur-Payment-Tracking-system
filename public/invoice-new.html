@@ -1,32 +1,128 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>New invoice · Expur</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="/css/style.css" rel="stylesheet"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Ctext x='16' y='23' font-size='19' font-weight='700' text-anchor='middle' fill='white' font-family='Arial'%3EE%3C/text%3E%3C/svg%3E"></head><body><div id="nav"></div><div class="container pb-5"><div id="alerts"></div>
-<h4 class="mb-3">New invoice</h4>
-<form id="f" class="card card-body shadow-sm"><div class="row g-3 mb-3">
-<div class="col-md-4"><label class="form-label">Invoice no. <small class="text-muted">(from invoice book)</small></label><input id="inv" class="form-control" maxlength="50" placeholder="e.g. 0457" required></div>
-<div class="col-md-4"><label class="form-label">Delivery note no. <small class="text-muted">(optional)</small></label><input id="dn" class="form-control" maxlength="50" placeholder="e.g. DN-1021"></div>
-<div class="col-md-4"><label class="form-label">Invoice date</label><input id="idt" type="date" class="form-control"></div>
-<div class="col-md-6"><label class="form-label">Customer</label><select id="cu" class="form-select" required></select></div>
-<div class="col-md-3"><label class="form-label">Due date <small class="text-muted">(default +30 days)</small></label><input id="dd" type="date" class="form-control"></div>
-<div class="col-md-3"><label class="form-label">Notes</label><input id="nt" class="form-control"></div></div>
-<table class="table table-sm"><thead><tr><th>Product</th><th style="width:110px">Qty</th><th style="width:140px">Price</th><th class="text-end">Total</th><th></th></tr></thead><tbody id="it"></tbody></table>
-<div class="d-flex justify-content-between"><button type="button" class="btn btn-outline-secondary btn-sm" onclick="addRow()">+ Add item</button><h5>Total: <span id="tt">KES 0</span></h5></div>
-<button class="btn btn-primary mt-3">Create invoice</button></form>
-</div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script><script src="/js/app.js"></script><script>
-let P = [];
-function addRow() { const tr = document.createElement('tr');
-  tr.innerHTML = `<td><select class="form-select form-select-sm p">${P.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></td>
-  <td><input type="number" min="0.01" step="0.01" value="1" class="form-control form-control-sm q"></td><td><input type="number" min="0" step="0.01" class="form-control form-control-sm u"></td>
-  <td class="text-end t"></td><td><button type="button" class="btn-close" onclick="this.closest('tr').remove();calc()"></button></td>`;
-  const price = () => { tr.querySelector('.u').value = P.find(p => p.id == tr.querySelector('.p').value).unit_price; calc(); };
-  tr.querySelector('.p').onchange = price; tr.oninput = calc; it.appendChild(tr); price(); }
-function calc() { let s = 0; it.querySelectorAll('tr').forEach(tr => { const v = tr.querySelector('.q').value * tr.querySelector('.u').value; tr.querySelector('.t').textContent = kes(v); s += v; }); tt.textContent = kes(s); }
-f.onsubmit = async (e) => { e.preventDefault(); try {
-  const items = [...it.querySelectorAll('tr')].map(tr => ({ product_id: +tr.querySelector('.p').value, quantity: +tr.querySelector('.q').value, unit_price: +tr.querySelector('.u').value }));
-  const v = await api('/invoices', { method: 'POST', body: { invoice_no: inv.value.trim(), delivery_note_no: dn.value.trim() || undefined, issue_date: idt.value || undefined, customer_id: +cu.value, due_date: dd.value || undefined, notes: nt.value || undefined, items } });
-  alert('Created ' + v.invoice_no); location.href = '/invoices.html';
-} catch (err) { notify(err.message); } };
-(async () => { if (!init('invoice-new')) return; idt.value = today(); try {
-  const [c, p] = await Promise.all([api('/customers'), api('/products')]); P = p;
-  cu.innerHTML = c.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
-  if (!c.length || !p.length) notify('Add at least one customer and one product first.', 'warning'); else addRow();
-} catch (e) { notify(e.message); } })();
-</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New invoice - Expur</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2317151f'/%3E%3Ctext x='16' y='22.5' font-family='Arial' font-weight='700' font-size='18' text-anchor='middle' fill='white'%3EE%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/style.css">
+<style>
+  .line { display: grid; grid-template-columns: minmax(0, 1fr) 92px 130px 124px 34px; gap: 10px; align-items: center; }
+  .line + .line { margin-top: 10px; }
+  .line .tot { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
+  .line-h { color: var(--muted); font-size: 12.5px; margin-bottom: 8px; }
+  @media (max-width: 760px) { .line { grid-template-columns: 1fr 1fr 34px; } .line .prod { grid-column: 1 / -1; } .line .tot { grid-column: 1 / 3; text-align: left; } .line-h { display: none; } }
+  .sum { display: grid; gap: 10px; }
+  .sum div { display: flex; justify-content: space-between; }
+  .sum .grand { font-size: 22px; font-weight: 600; letter-spacing: -.02em; padding-top: 12px; border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<main class="view" id="view">
+  <form id="f" class="cols" novalidate>
+    <div class="stack">
+      <section class="card">
+        <div class="card-h">Invoice details</div>
+        <div class="card-b"><div class="form-grid">
+          <div class="field c6"><label for="inv">Invoice no.</label><input class="in" id="inv" maxlength="50" placeholder="As written in your invoice book" autocomplete="off"><span class="hint">Saved exactly as you type it. Leave blank to number it automatically.</span></div>
+          <div class="field c6"><label for="dn">Delivery note no.</label><input class="in" id="dn" maxlength="50" placeholder="Optional" autocomplete="off"></div>
+          <div class="field c12"><label for="cust">Customer</label><select class="in" id="cust" required><option value="">Choose a customer</option></select><span class="hint">Not in the list? <a href="/customers.html" style="color:var(--accent);font-weight:500">Add a customer first</a>.</span></div>
+          <div class="field c6"><label for="issue">Issue date</label><input class="in" id="issue" type="date"></div>
+          <div class="field c6"><label for="due">Due date</label><input class="in" id="due" type="date"></div>
+          <div class="field c12"><label for="notes">Notes</label><input class="in" id="notes" placeholder="Optional"></div>
+        </div></div>
+      </section>
+
+      <section class="card">
+        <div class="card-h">Items</div>
+        <div class="card-b">
+          <div class="line line-h"><span>Product</span><span>Quantity</span><span>Unit price</span><span class="right">Line total</span><span></span></div>
+          <div id="lines"></div>
+          <button class="btn sm" type="button" id="add" style="margin-top:14px">+ Add another item</button>
+        </div>
+      </section>
+    </div>
+
+    <aside class="stack">
+      <section class="card"><div class="card-h">Summary</div><div class="card-b sum">
+        <div><span class="muted">Items</span><span id="n">0</span></div>
+        <div class="grand"><span>Total</span><span id="total">KES 0</span></div>
+        <p class="err" id="err" role="alert"></p>
+        <button class="btn primary block" id="save" type="submit">Create invoice</button>
+        <a class="btn block" href="/invoices.html" style="height:40px">Cancel</a>
+      </div></section>
+    </aside>
+  </form>
+</main>
+<script src="/js/app.js"></script>
+<script>
+let products = [];
+const addDays = (s, n) => { const d = new Date(s + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+
+function addLine() {
+  const el = document.createElement('div');
+  el.className = 'line';
+  el.innerHTML = `<select class="in prod" aria-label="Product"><option value="">Choose a product</option>${products.map((p) => `<option value="${p.id}" data-price="${p.unit_price}">${esc(p.name)}</option>`).join('')}</select>
+    <input class="in qty" type="number" min="0.01" step="any" value="1" aria-label="Quantity">
+    <input class="in price" type="number" min="0" step="0.01" aria-label="Unit price">
+    <span class="tot">KES 0</span>
+    <button class="icon-btn rm" type="button" aria-label="Remove item">${ico('x')}</button>`;
+  $('#lines').appendChild(el);
+}
+const lines = () => $$('#lines .line').map((l) => ({ el: l, product_id: +$('.prod', l).value || 0, quantity: +$('.qty', l).value, unit_price: $('.price', l).value === '' ? NaN : +$('.price', l).value }));
+function recalc() {
+  let total = 0, n = 0;
+  lines().forEach((l) => { const t = (l.quantity > 0 && l.unit_price >= 0 ? l.quantity * l.unit_price : 0); $('.tot', l.el).textContent = kes(t); total += t; if (l.product_id) n++; });
+  $('#total').textContent = kes(total); $('#n').textContent = n;
+}
+
+$('#lines').addEventListener('input', recalc);
+$('#lines').addEventListener('change', (e) => {
+  if (e.target.classList.contains('prod')) { const l = e.target.closest('.line'); $('.price', l).value = e.target.selectedOptions[0].dataset.price ?? ''; }
+  recalc();
+});
+$('#lines').addEventListener('click', (e) => {
+  if (!e.target.closest('.rm')) return;
+  if ($$('#lines .line').length > 1) e.target.closest('.line').remove(); recalc();
+});
+$('#add').onclick = () => { addLine(); recalc(); };
+
+$('#f').onsubmit = async (ev) => {
+  ev.preventDefault();
+  const err = $('#err'), btn = $('#save'); err.textContent = '';
+  const items = lines().filter((l) => l.product_id);
+  if (!$('#cust').value) { err.textContent = 'Choose a customer.'; $('#cust').focus(); return; }
+  if (!items.length) { err.textContent = 'Add at least one item.'; return; }
+  if (items.some((l) => !(l.quantity > 0) || !(l.unit_price >= 0))) { err.textContent = 'Check the quantity and price on each item.'; return; }
+
+  const typed = $('#inv').value.trim();
+  btn.disabled = true; btn.textContent = 'Creating...';
+  try {
+    const inv = await api('/invoices', { method: 'POST', body: {
+      invoice_no: typed || undefined, delivery_note_no: $('#dn').value.trim() || undefined,
+      customer_id: +$('#cust').value, issue_date: $('#issue').value || undefined, due_date: $('#due').value || undefined,
+      notes: $('#notes').value.trim() || undefined,
+      items: items.map(({ product_id, quantity, unit_price }) => ({ product_id, quantity, unit_price })) } });
+    // Self-check: the server must hand back exactly what was typed. If it doesn't, it is running old code.
+    if (typed && inv.invoice_no !== typed) {
+      err.textContent = `Invoice created, but the server saved it as ${inv.invoice_no} instead of ${typed}. The server is running an old version of the app. Update and restart it, then fix this invoice from its details.`;
+      btn.disabled = false; btn.textContent = 'Create invoice'; return;
+    }
+    notify(`Invoice ${inv.invoice_no} created`);
+    location.href = '/invoices.html?new=' + encodeURIComponent(inv.invoice_no);
+  } catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = 'Create invoice'; }
+};
+
+if (init({ active: 'invoices', title: 'New invoice' })) {
+  $('#add').textContent = '+ Add another item';
+  $('#issue').value = today(); $('#due').value = addDays(today(), 30);
+  Promise.all([api('/customers'), api('/products')]).then(([c, p]) => {
+    products = p;
+    $('#cust').insertAdjacentHTML('beforeend', c.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join(''));
+    addLine(); recalc();
+  }).catch((e) => notify(e.message, 'bad'));
+  $('#issue').addEventListener('change', () => { if ($('#issue').value) $('#due').value = addDays($('#issue').value, 30); });
+}
+</script>
+</body>
+</html>
