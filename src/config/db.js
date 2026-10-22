@@ -8,6 +8,9 @@ types.setTypeParser(1082, (v) => v);
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+  // Each Vercel function instance gets its own pool, so keep it small
+  max: process.env.VERCEL ? 3 : 10,
+  idleTimeoutMillis: 10000,
 });
 
 pool.on('error', (err) => console.error('Unexpected PG pool error:', err));

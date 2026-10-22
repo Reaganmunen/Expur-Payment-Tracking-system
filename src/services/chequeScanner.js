@@ -1,4 +1,4 @@
-// Reads a photographed cheque with Claude's vision API.
+// Reads a photographed cheque with Google's Gemini vision API.
 //
 // Everything the model returns is treated as an untrusted *suggestion*:
 //  - it is sanitised below (types, lengths, dates)
@@ -8,10 +8,12 @@
 // instructions can at worst produce a wrong suggestion that a human sees and corrects.
 const ApiError = require('../utils/ApiError');
 
-const API_URL = () => process.env.ANTHROPIC_API_URL || 'https://api.anthropic.com/v1/messages';
-const MODEL = () => process.env.CHEQUE_SCAN_MODEL || 'claude-sonnet-5-5';
+const MODEL = () => process.env.CHEQUE_SCAN_MODEL || 'gemini-2.5-flash';
+const API_URL = () =>
+  process.env.GEMINI_API_URL ||
+  `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL())}:generateContent`;
 
-exports.isConfigured = () => Boolean(process.env.ANTHROPIC_API_KEY);
+exports.isConfigured = () => Boolean(process.env.GEMINI_API_KEY);
 
 const SYSTEM = `You read photographs of Kenyan bank cheques for a bookkeeping app.
 Reply with ONE JSON object and nothing else: no prose, no markdown fences.
@@ -102,20 +104,22 @@ exports.scan = async ({ buffer, mime }) => {
       signal: AbortSignal.timeout(60000),
       headers: {
         'content-type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
+        'x-goog-api-key': process.env.GEMINI_API_KEY,
       },
       body: JSON.stringify({
-        model: MODEL(),
-        max_tokens: 1000,
-        system: SYSTEM,
-        messages: [{
+        systemInstruction: { parts: [{ text: SYSTEM }] },
+        contents: [{
           role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: mime, data: buffer.toString('base64') } },
-            { type: 'text', text: 'Read this cheque and return the JSON.' },
+          parts: [
+            { inline_data: { mime_type: mime, data: buffer.toString('base64') } },
+            { text: 'Read this cheque and return the JSON.' },
           ],
         }],
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: 4096,
+          responseMimeType: 'application/json',
+        },
       }),
     });
   } catch (e) {
@@ -125,12 +129,13 @@ exports.scan = async ({ buffer, mime }) => {
   const data = await res.json().catch(() => null);
   if (!res.ok) {
     const why = data?.error?.message || `status ${res.status}`;
-    if (res.status === 401) throw new ApiError(502, 'The Anthropic API key was rejected. Check ANTHROPIC_API_KEY.');
-    if (res.status === 429 || res.status === 529) throw new ApiError(502, 'The reading service is busy. Try again in a minute.');
+    if (res.status === 400 && /api key/i.test(why)) throw new ApiError(502, 'The Gemini API key was rejected. Check GEMINI_API_KEY.');
+    if (res.status === 401 || res.status === 403) throw new ApiError(502, 'The Gemini API key was rejected or has no access. Check GEMINI_API_KEY.');
+    if (res.status === 429 || res.status === 503) throw new ApiError(502, 'The reading service is busy or the free limit was reached. Try again in a minute.');
     throw new ApiError(502, `Cheque reading failed: ${why}`);
   }
 
-  const text = (data?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+  const text = (data?.candidates?.[0]?.content?.parts || []).filter((p) => typeof p.text === 'string').map((p) => p.text).join('\n');
   try {
     return exports.clean(parseJson(text));
   } catch {
