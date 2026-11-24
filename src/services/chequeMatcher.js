@@ -10,6 +10,29 @@ const { query } = require('../config/db');
 
 const cents = (n) => Math.round(Number(n) * 100);
 
+// ---------- VAT withholding ----------
+// The customer deducts `rate` (2%) of each invoice and pays the rest by cheque.
+// invoice 1,000 -> cheque pays 980, 20 is "withheld VAT" (still settles the invoice).
+const DEFAULT_RATE = (() => {
+  const r = Number(process.env.VAT_WITHHOLDING_RATE ?? 0.02);
+  return Number.isFinite(r) && r >= 0 && r < 0.5 ? r : 0.02;
+})();
+const whtOf = (grossC, rate) => Math.round(grossC * rate);
+const netOf = (grossC, rate) => grossC - whtOf(grossC, rate);
+
+// Every invoice total (in cents) that would give exactly `cashC` after withholding.
+// Usually one value; a few neighbours cover rounding on odd cents.
+const grossCandidates = (cashC, rate) => {
+  if (!rate) return [cashC];
+  const base = Math.round(cashC / (1 - rate));
+  const hits = [];
+  for (let g = base - 4; g <= base + 4; g++) {
+    const off = Math.abs(netOf(g, rate) - cashC);
+    if (off <= 1) hits.push([off, g]);        // customers round the 2% differently, so allow 1 cent either way
+  }
+  return hits.sort((a, b) => a[0] - b[0]).map((h) => h[1]);   // exact fits first
+};
+
 // ---------- names ----------
 const STOP = new Set(['ltd', 'limited', 'co', 'company', 'enterprises', 'enterprise', 'inc', 'plc', 'the', 'and', 'of', 'ent', 'ke', 'kenya']);
 
@@ -113,15 +136,38 @@ const findSubset = (invoices, target) => {
   return null;
 };
 
+// Splits fully-paid invoices into cheque cash + withheld VAT so the cash adds up to the cheque to the cent.
+const splitFull = (invs, cashC, rate) => {
+  const grossC = invs.reduce((t, i) => t + cents(i.balance), 0);
+  const w = invs.map((i) => whtOf(cents(i.balance), rate));
+  const diff = (grossC - cashC) - w.reduce((t, x) => t + x, 0);   // a cent or two of rounding
+  if (w.length) w[w.length - 1] += diff;
+  return invs.map((inv, k) => ({ inv, whtC: w[k], cashC: cents(inv.balance) - w[k] }));
+};
+
+// Smallest set of invoices that a cheque of `cashC` clears in full once withholding is added back.
+const findSubsetNet = (invoices, cashC, rate) => {
+  for (const g of grossCandidates(cashC, rate)) {
+    const hit = findSubset(invoices, g);
+    if (hit) return hit;
+  }
+  return null;
+};
+
 // Pay oldest first until the cheque is used up (last invoice may be part-paid).
-const oldestFirst = (invoices, amountC) => {
-  let left = amountC;
+const oldestFirst = (invoices, cashC, rate) => {
+  let left = cashC;
   const out = [];
   for (const inv of invoices) {
     if (left <= 0) break;
-    const use = Math.min(left, cents(inv.balance));
-    out.push({ inv, applyC: use });
-    left -= use;
+    const bal = cents(inv.balance);
+    const full = netOf(bal, rate);
+    if (full <= left) { out.push({ inv, cashC: full, whtC: bal - full }); left -= full; }
+    else {
+      const gross = Math.min(bal, Math.round(left / (1 - rate)));   // part payment: add the 2% back
+      out.push({ inv, cashC: left, whtC: gross - left });
+      left = 0;
+    }
   }
   return out;
 };
@@ -129,7 +175,7 @@ const oldestFirst = (invoices, amountC) => {
 const byAge = (a, b) =>
   String(a.due_date).localeCompare(String(b.due_date)) || String(a.issue_date).localeCompare(String(b.issue_date)) || a.id - b.id;
 
-const shape = (inv, applyC) => ({
+const shape = (inv, applyC, whtC = 0) => ({
   invoice_id: inv.id,
   invoice_no: inv.invoice_no,
   delivery_note_no: inv.delivery_note_no,
@@ -140,12 +186,15 @@ const shape = (inv, applyC) => ({
   status: inv.status,
   total: inv.total,
   balance: inv.balance,
-  apply: applyC === null ? null : applyC / 100,
+  apply: applyC === null ? null : applyC / 100,          // what the cheque pays towards this invoice
+  withheld: applyC === null ? null : whtC / 100,        // VAT the customer kept back
+  settles: applyC === null ? null : (applyC + whtC) / 100, // total taken off the invoice balance
 });
 
 // ---------- the matcher ----------
 // `open` and `customers` are passed in so this function stays pure and testable.
-exports.suggest = ({ payer_name, amount, references, cheque_no, customer_id }, open, customers) => {
+exports.suggest = ({ payer_name, amount, references, cheque_no, customer_id, withholding_rate }, open, customers) => {
+  const rate = withholding_rate === undefined || withholding_rate === null ? DEFAULT_RATE : Number(withholding_rate) || 0;
   const amountC = amount ? cents(amount) : 0;
   const rk = refKeys(references, [cheque_no]);
 
@@ -177,7 +226,7 @@ exports.suggest = ({ payer_name, amount, references, cheque_no, customer_id }, o
       // two similar names: let the amount decide which one actually owes this much
       const fits = top.find((c) => {
         const inv = open.filter((i) => i.customer_id === c.id);
-        return inv.some((i) => cents(i.balance) === amountC) || findSubset(inv, amountC);
+        return inv.some((i) => netOf(cents(i.balance), rate) === amountC) || findSubsetNet(inv, amountC, rate);
       });
       chosen = (fits || top[0]).id;
       how = fits ? 'payer name and amount' : 'payer name (several similar customers)';
@@ -188,7 +237,7 @@ exports.suggest = ({ payer_name, amount, references, cheque_no, customer_id }, o
   }
 
   const candidates = scored;
-  if (!chosen) return { customer_id: null, candidates, allocations: [], open_invoices: [], method: null, confidence: 'none', reason: null, payer_differs: false, unallocated: amountC / 100 };
+  if (!chosen) return { customer_id: null, candidates, allocations: [], open_invoices: [], method: null, confidence: 'none', reason: null, payer_differs: false, unallocated: amountC / 100, withholding_rate: rate };
 
   const customer = customers.find((c) => c.id === chosen);
   const mine = open.filter((i) => i.customer_id === chosen).sort(byAge);
@@ -199,28 +248,28 @@ exports.suggest = ({ payer_name, amount, references, cheque_no, customer_id }, o
 
   if (mineRefs.length) {
     method = 'reference';
-    picks = oldestFirst(mineRefs.sort(byAge), amountC || Infinity);
-    const used = picks.reduce((s, p) => s + p.applyC, 0);
+    picks = oldestFirst(mineRefs.sort(byAge), amountC || Infinity, rate);
+    const used = picks.reduce((t, p) => t + p.cashC, 0);
     if (amountC && used < amountC) {
       // the named invoices don't use the whole cheque: see whether other invoices fill the gap exactly
       const rest = mine.filter((i) => !mineRefs.includes(i));
-      const extra = findSubset(rest, amountC - used);
-      if (extra) { picks.push(...extra.map((inv) => ({ inv, applyC: cents(inv.balance) }))); method = 'reference + amount'; }
+      const extra = findSubsetNet(rest, amountC - used, rate);
+      if (extra) { picks.push(...splitFull(extra, amountC - used, rate)); method = 'reference + amount'; }
     }
   } else if (amountC) {
-    const single = mine.find((i) => cents(i.balance) === amountC);
-    if (single) { picks = [{ inv: single, applyC: amountC }]; method = 'exact amount'; }
+    const single = mine.find((i) => netOf(cents(i.balance), rate) === amountC);
+    if (single) { picks = splitFull([single], amountC, rate); method = 'exact amount'; }
     else {
-      const sub = findSubset(mine, amountC);
-      if (sub) { picks = sub.sort(byAge).map((inv) => ({ inv, applyC: cents(inv.balance) })); method = 'combination'; }
-      else { picks = oldestFirst(mine, amountC); method = 'oldest first'; }
+      const sub = findSubsetNet(mine, amountC, rate);
+      if (sub) { picks = splitFull(sub.sort(byAge), amountC, rate); method = 'combination'; }
+      else { picks = oldestFirst(mine, amountC, rate); method = 'oldest first'; }
     }
   }
 
-  const allocatedC = picks.reduce((s, p) => s + p.applyC, 0);
+  const allocatedC = picks.reduce((t, p) => t + p.cashC, 0);
   const nameOk = (scored.find((c) => c.id === chosen)?.score || 0) >= 0.6;
   // "clears exactly": the cheque pays every chosen invoice in full, to the cent
-  const clearsExactly = amountC > 0 && allocatedC === amountC && picks.every((p) => p.applyC === cents(p.inv.balance));
+  const clearsExactly = amountC > 0 && allocatedC === amountC && picks.every((p) => p.cashC + p.whtC === cents(p.inv.balance));
 
   let confidence = 'low';
   if (method === 'reference' || method === 'reference + amount') confidence = clearsExactly && !payerDiffers ? 'high' : 'medium';
@@ -236,9 +285,11 @@ exports.suggest = ({ payer_name, amount, references, cheque_no, customer_id }, o
     confidence,
     reason: how,
     payer_differs: payerDiffers,
-    allocations: picks.map((p) => shape(p.inv, p.applyC)),
+    withholding_rate: rate,
+    allocations: picks.map((p) => shape(p.inv, p.cashC, p.whtC)),
     open_invoices: mine.map((i) => shape(i, null)),
     unallocated: amountC ? (amountC - allocatedC) / 100 : null,
+    withheld_total: picks.reduce((t, p) => t + p.whtC, 0) / 100,
   };
 };
 
@@ -261,4 +312,5 @@ exports.match = async (input, user) => {
 };
 
 // exported for tests
-exports._internal = { nameScore, keys, refKeys, findSubset, tokens };
+exports.DEFAULT_RATE = DEFAULT_RATE;
+exports._internal = { nameScore, keys, refKeys, findSubset, tokens, findSubsetNet, grossCandidates, splitFull, oldestFirst, netOf };

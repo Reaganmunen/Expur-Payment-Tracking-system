@@ -71,7 +71,7 @@ const STATUS = {
   PAID: ['ok', 'Paid'], PARTIAL: ['info', 'Part paid'], UNPAID: ['', 'Unpaid'], OVERDUE: ['bad', 'Overdue'], WRITTEN_OFF: ['dark', 'Written off'],
   pending: ['warn', 'To review'], recorded: ['ok', 'Recorded'], void: ['dark', 'Void'],
 };
-const METHOD = { mpesa: 'M-Pesa', cash: 'Cash', bank: 'Bank transfer', cheque: 'Cheque' };
+const METHOD = { mpesa: 'M-Pesa', cash: 'Cash', bank: 'Bank transfer', cheque: 'Cheque', vat_withheld: 'VAT withheld (2%)' };
 const methodLabel = (m) => METHOD[m] || m;
 const badge = (s) => { const [c, l] = STATUS[s] || ['', s]; return `<span class="pill ${c}">${esc(l)}</span>`; };
 

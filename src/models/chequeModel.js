@@ -4,7 +4,7 @@ const ApiError = require('../utils/ApiError');
 // Never SELECT * here: keep the heavy `scan` JSON out of lists. Images are in a separate table.
 const LIST_COLS = `c.id, c.status, c.payer_name, c.cheque_no, c.bank, c.cheque_date, c.amount,
   c.customer_id, cu.name AS customer, c.allocations, c.uploaded_by, u.name AS uploaded_by_name,
-  c.created_at, c.recorded_at, c.voided_at, c.void_reason`;
+  c.created_at, c.recorded_at, c.voided_at, c.void_reason, c.withholding_rate`;
 const FROM = `FROM cheques c LEFT JOIN customers cu ON cu.id = c.customer_id LEFT JOIN users u ON u.id = c.uploaded_by`;
 
 exports.getAll = async ({ status, uploaded_by } = {}) => {
@@ -52,7 +52,7 @@ const cents = (n) => Math.round(Number(n) * 100);
 
 // Turns a pending cheque into real payments. All or nothing.
 //   fields:      { payer_name, cheque_no, bank, cheque_date, amount, customer_id }
-//   allocations: [{ invoice_id, amount }]
+//   allocations: [{ invoice_id, amount (cheque money), withheld (VAT kept back, optional) }]
 //   restrict_to: staff may only apply cheques to invoices they created
 exports.record = (id, fields, allocations, { userId, restrict_to }) =>
   withTransaction(async (client) => {
@@ -79,22 +79,32 @@ exports.record = (id, fields, allocations, { userId, restrict_to }) =>
       if (inv.written_off) throw new ApiError(409, `Invoice ${inv.invoice_no} is written off. Reverse the write-off first.`);
 
       const { rows: [s] } = await client.query('SELECT balance FROM invoice_summary WHERE id = $1', [inv.id]);
-      if (cents(a.amount) > cents(s.balance)) {
-        throw new ApiError(409, `Invoice ${inv.invoice_no} only has ${s.balance} left to pay, but ${a.amount} was applied to it.`);
+      const withheld = Number(a.withheld) || 0;
+      // the invoice is credited with the cheque money AND the VAT the customer kept back
+      if (cents(a.amount) + cents(withheld) > cents(s.balance)) {
+        throw new ApiError(409, `Invoice ${inv.invoice_no} only has ${s.balance} left to pay, but ${(cents(a.amount) + cents(withheld)) / 100} was applied to it.`);
       }
       const { rows: [pay] } = await client.query(
         `INSERT INTO payments (invoice_id, amount, method, reference, recorded_by, cheque_id)
          VALUES ($1,$2,'cheque',$3,$4,$5) RETURNING id`,
         [inv.id, a.amount, `CHQ-${fields.cheque_no}/${inv.invoice_no}`, userId, id]);
-      saved.push({ payment_id: pay.id, invoice_id: inv.id, invoice_no: inv.invoice_no, amount: a.amount });
+      let whtPayId = null;
+      if (withheld > 0) {
+        const { rows: [w] } = await client.query(
+          `INSERT INTO payments (invoice_id, amount, method, reference, recorded_by, cheque_id)
+           VALUES ($1,$2,'vat_withheld',$3,$4,$5) RETURNING id`,
+          [inv.id, withheld, `WHT-${fields.cheque_no}/${inv.invoice_no}`, userId, id]);
+        whtPayId = w.id;
+      }
+      saved.push({ payment_id: pay.id, vat_payment_id: whtPayId, invoice_id: inv.id, invoice_no: inv.invoice_no, amount: a.amount, withheld });
     }
 
     await client.query(
       `UPDATE cheques SET status = 'recorded', payer_name = $2, cheque_no = $3, bank = $4, cheque_date = $5::date,
-              amount = $6, customer_id = $7, allocations = $8, recorded_at = now()
+              amount = $6, customer_id = $7, allocations = $8, withholding_rate = $9, recorded_at = now()
        WHERE id = $1`,
       [id, fields.payer_name, fields.cheque_no, fields.bank, fields.cheque_date, fields.amount,
-       fields.customer_id, JSON.stringify(saved)]);
+       fields.customer_id, JSON.stringify(saved), fields.withholding_rate || 0]);
     return saved;
   });
 

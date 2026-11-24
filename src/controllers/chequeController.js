@@ -6,6 +6,14 @@ const ApiError = require('../utils/ApiError');
 const { requireFields, positiveNumber, ensureFound } = require('../utils/validate');
 const { isAdmin } = require('../utils/redact');
 
+// 0.02 = the customer pays 98% and keeps 2% back as withholding VAT. 0 = paid in full.
+const parseRate = (v) => {
+  if (v === undefined || v === null || v === '') return Matcher.DEFAULT_RATE;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > 0.2) throw new ApiError(400, 'withholding_rate must be between 0 and 0.2');
+  return n;
+};
+
 const MAX_IMAGE = 4 * 1024 * 1024;
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(s + 'T00:00:00Z').getTime());
 const text = (v, max, name) => {
@@ -125,6 +133,7 @@ exports.match = asyncHandler(async (req, res) => {
   const suggestion = await Matcher.match({
     payer_name: text(b.payer_name, 120, 'payer_name'), amount, references,
     cheque_no: text(b.cheque_no, 50, 'cheque_no'), customer_id: b.customer_id ? Number(b.customer_id) : null,
+    withholding_rate: parseRate(b.withholding_rate),
   }, req.user);
   res.json({ suggestion });
 });
@@ -142,6 +151,7 @@ exports.record = asyncHandler(async (req, res) => {
     cheque_date: b.cheque_date ? String(b.cheque_date) : null,
     amount,
     customer_id: b.customer_id ? Number(b.customer_id) : null,
+    withholding_rate: parseRate(b.withholding_rate),
   };
   if (fields.cheque_date && !isDate(fields.cheque_date)) throw new ApiError(400, 'cheque_date must look like 2026-10-16');
 
@@ -153,7 +163,17 @@ exports.record = asyncHandler(async (req, res) => {
     if (!Number.isInteger(invoice_id)) throw new ApiError(400, `allocations[${i}].invoice_id is invalid`);
     if (seen.has(invoice_id)) throw new ApiError(400, 'The same invoice was listed twice.');
     seen.add(invoice_id);
-    return { invoice_id, amount: positiveNumber(a.amount, `allocations[${i}].amount`) };
+    const cash = positiveNumber(a.amount, `allocations[${i}].amount`);          // what the cheque pays
+    const withheld = a.withheld === undefined || a.withheld === null || a.withheld === '' ? 0 : Number(a.withheld);
+    if (!Number.isFinite(withheld) || withheld < 0) throw new ApiError(400, `allocations[${i}].withheld is invalid`);
+    if (!fields.withholding_rate && withheld > 0) throw new ApiError(400, 'VAT withheld was sent but no withholding rate is set.');
+    // the withheld part must be about `rate` of what the invoice is credited with (a cent or two of rounding allowed)
+    const credited = Math.round((cash + withheld) * 100);
+    const expected = Math.round(credited * fields.withholding_rate);
+    if (Math.abs(Math.round(withheld * 100) - expected) > list.length + 1) {
+      throw new ApiError(400, `Withheld VAT on invoice ${invoice_id} should be ${(fields.withholding_rate * 100).toFixed(0)}% of ${(credited / 100).toLocaleString('en-KE')}.`);
+    }
+    return { invoice_id, amount: cash, withheld };
   });
   const total = allocations.reduce((s, a) => s + Math.round(a.amount * 100), 0);
   if (total > Math.round(amount * 100)) {
@@ -164,7 +184,7 @@ exports.record = asyncHandler(async (req, res) => {
     userId: req.user.id, restrict_to: isAdmin(req.user) ? null : req.user.id,
   });
   const { scan, ...cheque } = await Cheque.getById(c.id); // eslint-disable-line no-unused-vars
-  res.status(201).json({ cheque, payments, unallocated: (Math.round(amount * 100) - total) / 100 });
+  res.status(201).json({ cheque, payments, withheld: payments.reduce((t, p) => t + Math.round(p.withheld * 100), 0) / 100, unallocated: (Math.round(amount * 100) - total) / 100 });
 });
 
 exports.discard = asyncHandler(async (req, res) => {
